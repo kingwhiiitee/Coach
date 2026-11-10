@@ -212,15 +212,19 @@ function KnowledgeMap({
     cols.forEach((col, c) => col.forEach((n, r) => pos.set(n.id, { x: c * (COL_W + COL_GAP), y: r * (ROW_H + ROW_GAP) })));
     const width = cols.length * (COL_W + COL_GAP) - COL_GAP;
     const height = Math.max(0, ...cols.map((c) => c.length)) * (ROW_H + ROW_GAP) - ROW_GAP;
-    const byId = new Map(nodes.map((n) => [n.id, n]));
+    // "Ready" must count prerequisites in other courses too; `parents` only holds the in-course ones drawn on the map.
+    const levelOf = new Map<number, Level>([...nodes, ...(data.external_nodes ?? [])].map((n) => [n.id, n.level]));
+    const allParents = new Map<number, number[]>();
+    for (const e of data.edges)
+      if (e.relation === "prerequisite_of") allParents.set(e.to_id, [...(allParents.get(e.to_id) ?? []), e.from_id]);
     const ready = new Set(
       nodes
-        .filter((n) => !MASTERED.includes(n.level) && (parents.get(n.id) ?? []).length > 0)
-        .filter((n) => parents.get(n.id)!.every((p) => MASTERED.includes(byId.get(p)!.level)))
+        .filter((n) => !MASTERED.includes(n.level) && allParents.has(n.id))
+        .filter((n) => allParents.get(n.id)!.every((p) => MASTERED.includes(levelOf.get(p) ?? "unknown")))
         .map((n) => n.id),
     );
     return { cols, pos, pre, parents, children, width, height, ready };
-  }, [nodes, data.edges, ctx]);
+  }, [nodes, data.edges, data.external_nodes, ctx]);
 
   // Focusing a node lights up everything it depends on and everything that depends on it.
   const chain = useMemo(() => {
@@ -303,7 +307,7 @@ function KnowledgeMap({
           <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
             {layout.cols[0].map((n) => (
               <div key={n.id} style={{ height: ROW_H }}>
-                <NodeCard node={n} ctx={ctx} dim={!lit(n)} />
+                <NodeCard node={n} ctx={ctx} dim={!lit(n)} ready={layout.ready.has(n.id)} />
               </div>
             ))}
           </div>

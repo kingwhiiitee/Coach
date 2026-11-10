@@ -97,6 +97,21 @@ const cand = await call('review_candidates', { course_id, assessment_id });
 check(cand[0]?.title === '链式法则', 'review_candidates ranks weak high-value node first');
 const ov = await call('overview', {});
 check(ov.courses[0].levels.weak === 1 && ov.open_decisions.length === 2 && ov.last_sessions[0].summary, 'overview shows states, decisions, last session');
+check(ov.open_decisions[0].status === 'planned' && ov.open_decisions[0].course === '深度学习' && ov.last_sessions[0].course === '深度学习', 'overview lists planned decisions first, with course names');
+check((await call('review_candidates', { course_id }))[0]?.exam_value === 3, 'review_candidates defaults to the upcoming assessment');
+
+check((await call('get_node', { node_id: String(ids['链式法则']) })).node?.title === '链式法则', 'numeric string ids are coerced');
+check((await call('upsert_node', { course_id, titel: '拼错', kind: 'concept' })).error?.includes('unknown argument'), 'unknown argument names are rejected');
+check((await call('decide', { node_id: ids['链式法则'], assessment_id: 999999, action: 'practice', reason: 'x' })).error?.includes('not found'), 'decide checks referenced ids');
+const okStep = { context: 'delayed', hints: 'none', overall: 'correct', step_results: [{ step_no: 1, outcome: 'demonstrated' }] };
+const newTask = { source: 'ai_generated', steps: [{ node_id: ids['前向传播'] }] };
+const before = await call('record_attempt', { task: newTask, ...okStep });
+check(!!(await call('record_attempt', { task: newTask, ...okStep, step_results: [{ step_no: 2, outcome: 'failed' }] })).error, 'unknown step on a new task rejected');
+check(!!(await call('record_attempt', { task: newTask, ...okStep, executes_decision_id: d1.decision_id })).error, 'attempt cannot execute a decision that is not planned');
+check(!!(await call('record_attempt', { task: newTask, ...okStep, confidence: 150 })).error, 'confidence out of range rejected');
+const after = await call('record_attempt', { task: newTask, ...okStep });
+check(after.task_id === before.task_id + 1 && after.attempt_id === before.attempt_id + 1, 'rejected attempts leave no task or attempt behind');
+check((await fetch(BASE + '/api/courses/abc', { headers: { authorization: `Bearer ${TOKEN}` } })).status === 404, 'web API: non-numeric id → 404');
 
 const api = await fetch(BASE + `/api/courses/${course_id}`, { headers: { authorization: `Bearer ${TOKEN}` } });
 const tree = await api.json();

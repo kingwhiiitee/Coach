@@ -77,6 +77,8 @@ export interface Course {
   id: number;
   name: string;
   status: "active" | "paused" | "done";
+  subject: string | null;
+  kind: "course" | "foundation";
   created_at: string;
   node_count: number;
   assessments: Assessment[];
@@ -88,6 +90,7 @@ export interface OpenDecision {
   node_id: number | null;
   title: string | null;
   course_id: number | null;
+  course: string | null;
   assessment_id: number | null;
   action: string;
   reason: string;
@@ -102,6 +105,7 @@ export interface OpenDecision {
 export interface Session {
   id: number;
   course_id: number | null;
+  course: string | null;
   started_at: string;
   planned_min: number | null;
   goal: string | null;
@@ -239,6 +243,7 @@ export interface NodeDetail {
   node: {
     id: number;
     course_id: number;
+    course: string;
     title: string;
     kind: string;
     usage?: string | null;

@@ -47,7 +47,8 @@ export function DecisionList({ decisions, compact }: { decisions: OpenDecision[]
             </div>
             <div className="flex min-w-0 flex-1 flex-col gap-0.5">
               <div className="flex flex-wrap items-center gap-2">
-                <span className="text-body-medium text-text-primary">{d.title ? <MathText>{d.title}</MathText> : "整门课"}</span>
+                <span className="text-body-medium text-text-primary">{d.title ? <MathText>{d.title}</MathText> : (d.course ?? "整门课")}</span>
+                {d.node_id && d.course ? <span className="text-caption-1-regular text-text-tertiary">{d.course}</span> : null}
                 {d.node_id ? <ValuePips value={d.exam_value} /> : null}
                 {d.stale && d.status === "planned" ? (
                   <Chip variant="caption" color="yellow" title="做出这条决策后，这个知识点的状态又被重新评估过">

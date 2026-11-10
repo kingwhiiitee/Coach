@@ -51,6 +51,55 @@ const obj = (properties: Json, required: string[] = []): Schema => ({
   additionalProperties: false,
 });
 
+// Callers are LLMs: they send "5" for 5 and invent argument names. Numeric strings are coerced; an
+// unknown name is rejected with the allowed list, because silently dropping it loses what the model
+// meant to record. null means "not given" unless the schema allows null (estimate_value.value).
+function conform(schema: Schema, value: unknown, path: string): unknown {
+  const types = ([] as string[]).concat((schema.type as string | string[] | undefined) ?? []);
+  const at = path || 'arguments';
+  if (value === null && types.includes('null')) return null;
+  const type = types.find((t) => t !== 'null');
+  if (type === 'integer') {
+    const n = typeof value === 'string' && /^-?\d+$/.test(value.trim()) ? Number(value) : value;
+    if (typeof n !== 'number' || !Number.isInteger(n)) throw new ToolError(`${at} must be an integer`);
+    const { minimum, maximum } = schema as { minimum?: number; maximum?: number };
+    if ((minimum !== undefined && n < minimum) || (maximum !== undefined && n > maximum))
+      throw new ToolError(`${at} must be between ${minimum} and ${maximum}`);
+    return n;
+  }
+  if (type === 'boolean') {
+    if (value === 'true' || value === 'false') return value === 'true';
+    if (typeof value !== 'boolean') throw new ToolError(`${at} must be true or false`);
+    return value;
+  }
+  if (type === 'string') {
+    const v = typeof value === 'number' ? String(value) : value;
+    if (typeof v !== 'string') throw new ToolError(`${at} must be a string`);
+    const allowed = schema.enum as string[] | undefined;
+    if (allowed && v !== '' && !allowed.includes(v)) throw new ToolError(`${at} must be one of: ${allowed.join(', ')}`);
+    return v;
+  }
+  if (type === 'array') {
+    if (!Array.isArray(value)) throw new ToolError(`${at} must be an array`);
+    return value.map((v, i) => conform(schema.items as Schema, v, `${path}[${i}]`));
+  }
+  if (type === 'object') {
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new ToolError(`${at} must be an object`);
+    const props = (schema.properties ?? {}) as Record<string, Schema>;
+    const out: Json = {};
+    for (const [k, v] of Object.entries(value)) {
+      const key = path ? `${path}.${k}` : k;
+      if (!(k in props)) throw new ToolError(`unknown argument: ${key}. Allowed: ${Object.keys(props).join(', ')}`);
+      if (v === undefined || (v === null && !([] as string[]).concat((props[k].type as string | string[]) ?? []).includes('null'))) continue;
+      out[k] = conform(props[k], v, key);
+    }
+    for (const k of (schema.required ?? []) as string[])
+      if (out[k] === undefined || out[k] === '') throw new ToolError(`missing required argument: ${path ? `${path}.${k}` : k}`);
+    return out;
+  }
+  return value;
+}
+
 function need<T>(args: Json, key: string): T {
   const v = args[key];
   if (v === undefined || v === null || v === '') throw new ToolError(`missing required argument: ${key}`);
@@ -97,11 +146,16 @@ async function plannedFor(env: Env, nodeIds: number[]) {
   );
 }
 
-async function completeDecision(env: Env, decisionId: number, nodeIds: number[], sessionId: number | null, outcome: string | null) {
+// Run before any write: a record_* call that fails after writing gets retried by the model and
+// leaves duplicate attempts/evidence behind.
+async function checkExecutable(env: Env, decisionId: number, nodeIds: number[]) {
   const d = await mustExist(env, 'decisions', decisionId, 'decision');
   if (d.status !== 'planned') throw new ToolError(`decision ${decisionId} is ${d.status}, not planned`);
   if (d.node_id !== null && !nodeIds.includes(d.node_id as number))
     throw new ToolError(`decision ${decisionId} is about node ${d.node_id}, not the node(s) recorded here`);
+}
+
+async function completeDecision(env: Env, decisionId: number, sessionId: number | null, outcome: string | null) {
   await env.DB.prepare(
     `UPDATE decisions SET status = 'done', done_session = COALESCE(?, done_session), outcome = COALESCE(?, outcome) WHERE id = ?`,
   )
@@ -262,17 +316,25 @@ export async function overview(env: Env, courseId: number | null) {
      GROUP BY course_id, level`,
     ...(courseId ? [courseId] : []),
   );
+  // Planned first: the list is capped, and a long tail of active skip/skim scope decisions must not
+  // push the next steps out of it.
   const decisions = await all(
     env,
-    `SELECT d.id, d.node_id, d.title, d.course_id, d.assessment_id, d.action, d.reason, d.condition, d.priority, d.status,
-            d.exam_value, d.decided_at, ${STALE_SQL} AS stale
-     FROM open_decisions d ${courseId ? 'WHERE d.course_id = ? OR d.node_id IN (SELECT id FROM nodes WHERE course_id = ?)' : ''}
-     LIMIT 30`,
-    ...(courseId ? [courseId, courseId] : []),
+    `SELECT d.id, d.node_id, n.title, COALESCE(d.course_id, n.course_id) AS course_id, c.name AS course, d.assessment_id,
+            d.action, d.reason, d.condition, d.priority, d.status, cv.value AS exam_value, d.decided_at, ${STALE_SQL} AS stale
+     FROM decisions d
+     LEFT JOIN nodes n ON n.id = d.node_id
+     LEFT JOIN courses c ON c.id = COALESCE(d.course_id, n.course_id)
+     LEFT JOIN current_values cv ON cv.node_id = d.node_id AND cv.assessment_id = d.assessment_id
+     WHERE d.status IN ('planned','active') ${courseId ? 'AND COALESCE(d.course_id, n.course_id) = ?' : ''}
+     ORDER BY d.status DESC, d.priority IS NULL, d.priority, cv.value DESC, d.decided_at
+     LIMIT 50`,
+    ...(courseId ? [courseId] : []),
   );
   const lastSessions = await all(
     env,
-    `SELECT * FROM sessions ${courseId ? 'WHERE course_id = ?' : ''} ORDER BY started_at DESC, id DESC LIMIT 3`,
+    `SELECT s.*, c.name AS course FROM sessions s LEFT JOIN courses c ON c.id = s.course_id
+     ${courseId ? 'WHERE s.course_id = ?' : ''} ORDER BY s.started_at DESC, s.id DESC LIMIT 3`,
     ...(courseId ? [courseId] : []),
   );
   return {
@@ -606,12 +668,27 @@ export const TOOLS: Tool[] = [
     description:
       'Nodes most worth checking next in a course: weak, recheck, assisted or exposed nodes, and independent/validated ones not seen for 14+ days, ordered by exam value. Nodes with an active skip decision are left out. Use this to choose the next task; it is a ranking aid, not a schedule.',
     inputSchema: obj(
-      { course_id: int('Course id'), assessment_id: int('Rank by value for this assessment'), limit: int('Default 10') },
+      {
+        course_id: int('Course id'),
+        assessment_id: int('Rank by value for this assessment; default: the course\'s nearest upcoming assessment'),
+        limit: int('Default 10'),
+      },
       ['course_id'],
     ),
     run: async (env, a) => {
       const course = need<number>(a, 'course_id');
-      const assessment = opt<number>(a, 'assessment_id');
+      await mustExist(env, 'courses', course, 'course');
+      let assessment = opt<number>(a, 'assessment_id');
+      if (assessment) await mustExist(env, 'assessments', assessment, 'assessment');
+      else
+        assessment =
+          (
+            await first<{ id: number }>(
+              env,
+              `SELECT id FROM assessments WHERE course_id = ? AND status = 'upcoming' ORDER BY exam_date IS NULL, exam_date, id LIMIT 1`,
+              course,
+            )
+          )?.id ?? null;
       return all(
         env,
         `SELECT s.node_id, s.title, s.level, s.weak_point, b.suggested_level, b.last_seen,
@@ -886,15 +963,19 @@ export const TOOLS: Tool[] = [
       planned_min: int('Minutes the student has'),
       goal: str('应考 / 新概念 / 查漏补缺 / 巩固, in the student\'s words'),
     }),
-    run: async (env, a) => ({
-      session_id: await insertId(
-        env,
-        'INSERT INTO sessions (course_id, planned_min, goal) VALUES (?, ?, ?)',
-        opt(a, 'course_id'),
-        opt(a, 'planned_min'),
-        opt(a, 'goal'),
-      ),
-    }),
+    run: async (env, a) => {
+      const course = opt<number>(a, 'course_id');
+      if (course) await mustExist(env, 'courses', course, 'course');
+      return {
+        session_id: await insertId(
+          env,
+          'INSERT INTO sessions (course_id, planned_min, goal) VALUES (?, ?, ?)',
+          course,
+          opt(a, 'planned_min'),
+          opt(a, 'goal'),
+        ),
+      };
+    },
   },
   {
     name: 'end_session',
@@ -970,7 +1051,13 @@ export const TOOLS: Tool[] = [
       const sessionId = opt<number>(a, 'session_id');
       if (sessionId) await mustExist(env, 'sessions', sessionId, 'session');
       const results = need<Json[]>(a, 'step_results');
+      if (!results.length) throw new ToolError('step_results must list at least one step');
+      const confidence = opt<number>(a, 'confidence');
+      if (confidence !== null && (confidence < 0 || confidence > 100)) throw new ToolError('confidence must be 0–100');
+      const seen = new Set<unknown>();
       for (const r of results) {
+        if (seen.has(r.step_no)) throw new ToolError(`step ${r.step_no} appears twice in step_results`);
+        seen.add(r.step_no);
         inEnum(r.outcome, OUTCOMES, 'outcome');
         inEnum(r.qualifier ?? null, QUALIFIERS, 'qualifier');
         for (const d of (r.difficulties as string[] | undefined) ?? []) inEnum(d, DIFFICULTIES, 'difficulty');
@@ -978,7 +1065,15 @@ export const TOOLS: Tool[] = [
           throw new ToolError(`step ${r.step_no}: difficulties only apply to failed or unclear steps`);
       }
 
+      // Everything that can be rejected is checked before the first INSERT: a failed call must leave
+      // no orphan task or attempt behind, since the model will simply call again.
       let taskId = opt<number>(a, 'task_id');
+      const exec = opt<number>(a, 'executes_decision_id');
+      const checkSteps = async (stepNos: number[], stepNodes: number[]) => {
+        for (const r of results)
+          if (!stepNos.includes(r.step_no as number)) throw new ToolError(`task ${taskId ?? '(new)'} has no step ${r.step_no}`);
+        if (exec) await checkExecutable(env, exec, stepNodes);
+      };
       if (!taskId) {
         const t = need<Json>(a, 'task');
         inEnum(t.source, TASK_SOURCES, 'task.source');
@@ -989,6 +1084,7 @@ export const TOOLS: Tool[] = [
           inEnum(s.role ?? null, ['core', 'supporting'], 'role');
           await mustExist(env, 'nodes', s.node_id as number, 'node');
         }
+        await checkSteps(steps.map((_, i) => i + 1), steps.map((s) => s.node_id as number));
         taskId = await insertId(
           env,
           'INSERT INTO tasks (source, source_ref, format, prompt, answer) VALUES (?, ?, ?, ?, ?)',
@@ -1019,8 +1115,7 @@ export const TOOLS: Tool[] = [
         taskId,
       );
       const byNo = new Map(steps.map((s) => [s.step_no, s]));
-      for (const r of results)
-        if (!byNo.has(r.step_no as number)) throw new ToolError(`task ${taskId} has no step ${r.step_no}`);
+      if (opt(a, 'task_id')) await checkSteps([...byNo.keys()], steps.map((s) => s.node_id));
 
       const attemptId = await insertId(
         env,
@@ -1031,7 +1126,7 @@ export const TOOLS: Tool[] = [
         a.context,
         a.hints,
         a.overall,
-        opt(a, 'confidence'),
+        confidence,
         opt(a, 'self_signal'),
         opt(a, 'seconds_spent'),
         opt(a, 'note'),
@@ -1060,8 +1155,7 @@ export const TOOLS: Tool[] = [
           );
       }
       const nodeIds = [...new Set(steps.map((s) => s.node_id))];
-      const exec = opt<number>(a, 'executes_decision_id');
-      const closed = exec ? await completeDecision(env, exec, nodeIds, sessionId, opt(a, 'decision_outcome')) : null;
+      const closed = exec ? await completeDecision(env, exec, sessionId, opt(a, 'decision_outcome')) : null;
       const open = await plannedFor(env, nodeIds);
       return {
         task_id: taskId,
@@ -1098,12 +1192,18 @@ export const TOOLS: Tool[] = [
       inEnum(opt(a, 'representation'), REPRESENTATIONS, 'representation');
       if (a.kind === 'prediction' && !opt(a, 'outcome')) throw new ToolError('prediction needs an outcome');
       await mustExist(env, 'nodes', need<number>(a, 'node_id'), 'node');
+      const sessionId = opt<number>(a, 'session_id');
+      if (sessionId) await mustExist(env, 'sessions', sessionId, 'session');
+      const diffs = (a.difficulties as string[] | undefined) ?? [];
+      for (const d of diffs) inEnum(d, DIFFICULTIES, 'difficulty');
+      const exec = opt<number>(a, 'executes_decision_id');
+      if (exec) await checkExecutable(env, exec, [a.node_id as number]);
       const id = await insertId(
         env,
         `INSERT INTO evidence (node_id, session_id, kind, outcome, qualifier, representation, interpretation, note)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
         a.node_id,
-        opt(a, 'session_id'),
+        sessionId,
         a.kind,
         opt(a, 'outcome'),
         opt(a, 'qualifier'),
@@ -1111,12 +1211,9 @@ export const TOOLS: Tool[] = [
         opt(a, 'interpretation'),
         opt(a, 'note'),
       );
-      const diffs = (a.difficulties as string[] | undefined) ?? [];
-      for (const d of diffs) inEnum(d, DIFFICULTIES, 'difficulty');
       if (diffs.length)
         await env.DB.batch(diffs.map((d) => env.DB.prepare('INSERT OR IGNORE INTO evidence_difficulties VALUES (?, ?)').bind(id, d)));
-      const exec = opt<number>(a, 'executes_decision_id');
-      const closed = exec ? await completeDecision(env, exec, [a.node_id as number], opt(a, 'session_id'), opt(a, 'decision_outcome')) : null;
+      const closed = exec ? await completeDecision(env, exec, sessionId, opt(a, 'decision_outcome')) : null;
       const open = await plannedFor(env, [a.node_id as number]);
       const notice = a.kind === 'exposure' || a.kind === 'prediction' ? await chainNotice(env, a.node_id as number) : null;
       return {
@@ -1234,6 +1331,10 @@ export const TOOLS: Tool[] = [
       inEnum(need(a, 'action'), ACTIONS, 'action');
       const node = opt<number>(a, 'node_id');
       if (node) await mustExist(env, 'nodes', node, 'node');
+      for (const [key, table, label] of [['course_id', 'courses', 'course'], ['assessment_id', 'assessments', 'assessment'], ['state_id', 'knowledge_states', 'state']]) {
+        const ref = opt<number>(a, key);
+        if (ref) await mustExist(env, table, ref, label);
+      }
       const pr = opt<number>(a, 'priority');
       if (pr !== null && (pr < 1 || pr > 3)) throw new ToolError('priority must be 1–3');
       const scope = SCOPE_ACTIONS.includes(a.action as string);
@@ -1285,6 +1386,10 @@ export const TOOLS: Tool[] = [
       inEnum(need(a, 'status'), ['done', 'revoked'], 'status');
       await mustExist(env, 'decisions', need<number>(a, 'decision_id'), 'decision');
       if (a.status === 'revoked' && !opt(a, 'revoked_why')) throw new ToolError('revoked_why is required when revoking');
+      const superseded = opt<number>(a, 'superseded_by');
+      if (superseded) await mustExist(env, 'decisions', superseded, 'decision');
+      const doneSession = opt<number>(a, 'done_session');
+      if (doneSession) await mustExist(env, 'sessions', doneSession, 'session');
       await env.DB.prepare(
         `UPDATE decisions SET status = ?, outcome = COALESCE(?, outcome),
            revoked_at = CASE WHEN ? = 'revoked' THEN datetime('now') ELSE revoked_at END,
@@ -1299,4 +1404,13 @@ export const TOOLS: Tool[] = [
   },
 ];
 
-export const TOOL_MAP = new Map(TOOLS.map((t) => [t.name, t]));
+const TOOL_MAP = new Map(TOOLS.map((t) => [t.name, t]));
+
+export function hasTool(name: string): boolean {
+  return TOOL_MAP.has(name);
+}
+
+export async function callTool(env: Env, name: string, args: unknown): Promise<unknown> {
+  const tool = TOOL_MAP.get(name)!;
+  return tool.run(env, conform(tool.inputSchema, args ?? {}, '') as Json);
+}

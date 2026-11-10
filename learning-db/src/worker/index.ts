@@ -2,9 +2,9 @@
 // /api/* = read-only JSON for the viewer; everything else = static assets from ./public.
 // wrangler.jsonc run_worker_first must list every route handled here, or assets will shadow it.
 //
-import { TOOLS, TOOL_MAP, ToolError, overview, courseTree, nodeDetail, type Env } from './tools';
+import { TOOLS, ToolError, callTool, hasTool, overview, courseTree, nodeDetail, type Env } from './tools';
 
-const SERVER_INFO = { name: 'learning-knowledge', version: '0.2.0' };
+const SERVER_INFO = { name: 'learning-knowledge', version: '0.3.0' };
 const PROTOCOL_VERSIONS = ['2025-06-18', '2025-03-26', '2024-11-05'];
 // Sent to every MCP client on initialize; clients use it as their operating manual for the tools.
 // Keep it in sync with the tool descriptions in tools.ts and with the adaptive-learning-coach SKILL.md.
@@ -41,9 +41,9 @@ function authorized(req: Request, env: Env, pathToken: string | null): boolean {
 type RpcRequest = { jsonrpc: '2.0'; id?: string | number | null; method: string; params?: Record<string, unknown> };
 
 async function handleRpc(env: Env, msg: RpcRequest): Promise<unknown | null> {
-  const isNotification = msg.id === undefined || msg.id === null;
+  const isNotification = msg?.id === undefined || msg.id === null;
   const ok = (result: unknown) => ({ jsonrpc: '2.0', id: msg.id, result });
-  const fail = (code: number, message: string) => ({ jsonrpc: '2.0', id: msg.id ?? null, error: { code, message } });
+  const fail = (code: number, message: string) => ({ jsonrpc: '2.0', id: msg?.id ?? null, error: { code, message } });
 
   if (msg?.jsonrpc !== '2.0' || typeof msg.method !== 'string') return fail(-32600, 'Invalid Request');
   if (isNotification) return null;
@@ -71,11 +71,9 @@ async function handleRpc(env: Env, msg: RpcRequest): Promise<unknown | null> {
       });
     case 'tools/call': {
       const name = String(msg.params?.name ?? '');
-      const tool = TOOL_MAP.get(name);
-      if (!tool) return fail(-32602, `Unknown tool: ${name}`);
-      const args = (msg.params?.arguments ?? {}) as Record<string, unknown>;
+      if (!hasTool(name)) return fail(-32602, `Unknown tool: ${name}`);
       try {
-        const result = await tool.run(env, args);
+        const result = await callTool(env, name, msg.params?.arguments);
         return ok({ content: [{ type: 'text', text: JSON.stringify(result, null, 1) }], isError: false });
       } catch (e) {
         const message = e instanceof ToolError ? e.message : `internal error: ${(e as Error).message}`;
@@ -108,10 +106,11 @@ async function handleMcp(req: Request, env: Env): Promise<Response> {
 // Read-only by design: the viewer must never write. All writes go through MCP tools.
 async function handleApi(url: URL, env: Env): Promise<Response> {
   const parts = url.pathname.split('/').filter(Boolean);
+  const id = /^\d+$/.test(parts[2] ?? '') ? Number(parts[2]) : null;
   try {
     if (parts[1] === 'overview' && parts.length === 2) return json(await overview(env, null));
-    if (parts[1] === 'courses' && parts.length === 3) return json(await courseTree(env, Number(parts[2])));
-    if (parts[1] === 'nodes' && parts.length === 3) return json(await nodeDetail(env, Number(parts[2])));
+    if (parts[1] === 'courses' && parts.length === 3 && id !== null) return json(await courseTree(env, id));
+    if (parts[1] === 'nodes' && parts.length === 3 && id !== null) return json(await nodeDetail(env, id));
     return json({ error: 'not found' }, 404);
   } catch (e) {
     if (e instanceof ToolError) return json({ error: e.message }, 404);

@@ -20,3 +20,27 @@ jobs:
           node-version: ${{ matrix.node }}
       - run: npm test
       - run: node scripts/build.mjs
+
+  learning-db:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: learning-db
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - run: npm ci
+      - run: npm run typecheck
+      - name: public/ matches a fresh build of web/
+        run: |
+          npm run build:web
+          test -z "$(git status --porcelain public)" || { git status --short public; exit 1; }
+      - name: e2e against a fresh local D1
+        run: |
+          echo 'ACCESS_TOKEN="test-token-0123456789abcdef"' > .dev.vars
+          npm run db:init:local
+          npx wrangler dev --port 8787 > wrangler.log 2>&1 &
+          for i in $(seq 1 60); do curl -s -o /dev/null http://127.0.0.1:8787/ && break; sleep 1; done
+          BASE=http://127.0.0.1:8787 TOKEN=test-token-0123456789abcdef npm run e2e || { cat wrangler.log; exit 1; }

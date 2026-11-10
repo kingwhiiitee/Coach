@@ -1,7 +1,7 @@
 import { Breadcrumb, BreadcrumbItem } from "@/components/base/breadcrumb/breadcrumb";
 import { Chip } from "@/components/base/badges/chip";
 import { Table, TableHeader, TableColumn, TableBody, TableRow, TableCell } from "@/components/base/table/table";
-import { useApi, type NodeDetail, type CourseTree, type EvidenceRow } from "@/lib/api";
+import { useApi, type NodeDetail, type EvidenceRow } from "@/lib/api";
 import {
   ACTION,
   ASSESSED_BY,
@@ -32,7 +32,6 @@ import { LEVEL_BAR } from "./Overview";
 
 export function NodePage({ id }: { id: number }) {
   const { data, error, loading } = useApi<NodeDetail>(`/nodes/${id}`);
-  const course = useApi<CourseTree>(data ? `/courses/${data.node.course_id}` : null);
   if (loading) return <Loading />;
   if (error || !data) return <ErrorCard error={error!} />;
   const { node, current_state: cs, rule_baseline: rb } = data;
@@ -52,7 +51,7 @@ export function NodePage({ id }: { id: number }) {
     <>
       <Breadcrumb className="mb-3">
         <BreadcrumbItem href={href.overview}>知识库</BreadcrumbItem>
-        <BreadcrumbItem href={href.course(node.course_id)}>{course.data?.course.name ?? "课程"}</BreadcrumbItem>
+        <BreadcrumbItem href={href.course(node.course_id)}>{node.course}</BreadcrumbItem>
         <BreadcrumbItem current>
           <MathText>{node.title}</MathText>
         </BreadcrumbItem>

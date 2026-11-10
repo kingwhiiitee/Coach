@@ -32,6 +32,8 @@ BASE=http://127.0.0.1:8787 TOKEN=test-token-0123456789abcdef npm run e2e
 
 `npm run e2e` 会写数据，只能对着本地全新的库跑，绝不要指向线上 Worker。
 
+CI 的 `learning-db` job（ubuntu）会跑 typecheck、重新构建 `web/` 并要求 `public/` 没有差异、再对本地 D1 跑 e2e。改了 Worker 行为就在 `scripts/e2e.mjs` 里加一条检查。
+
 ## 必须遵守的约定
 
 **提交**：直接提交并推送到 `main`，不开 PR。推送前跑上面对应的检查。可能有其他 agent 同时在改，推送前先 `git pull --rebase`。
@@ -54,6 +56,8 @@ npx wrangler deploy
 - `schema.sql` 只用来建新库（`db:init:local`）。改表结构要同时改 `schema.sql` 并新增一个 `migrations/NNNN-*.sql`；迁移要兼容旧版 Worker（新列给默认值或可空），因为迁移和部署之间旧代码仍在跑。SQLite 改不了已有的 `CHECK`，要改枚举只能重建表（参考 `migrations/0003`）。
 - `tools.ts` 里的枚举数组与 `schema.sql` 的 `CHECK` 一一对应，改一边必须改另一边。
 - AI 永远不直接写 SQL：所有读写都通过 `src/worker/tools.ts` 里固定的 MCP 工具。`/api/*` 只读，网页不允许写。
+- 工具的 `inputSchema` 不只是给模型看的说明：`callTool` 会按它校验并转换参数（数字字符串转成整数，schema 里没列的参数名直接报错）。新增参数必须写进 schema，否则调用会被拒绝。
+- `record_attempt` / `record_evidence` 要在第一条 INSERT 之前做完所有校验：调用失败后模型会重试，中途失败会留下重复的题目、作答或证据。
 - 外键都没有 `ON DELETE`，删除级联由 `delete_record` 在一个 D1 batch 里手工完成。新增表或外键时要把它加进 `deletionPlan`。
 - `knowledge_states` 和 `node_values` 只追加不修改，最新一行就是当前值。`knowledge_states.basis` 是证据 id 的 JSON 数组，没有外键约束。
 - `prerequisite_of` 必须保持无环，`link_nodes` 在写入时检查。

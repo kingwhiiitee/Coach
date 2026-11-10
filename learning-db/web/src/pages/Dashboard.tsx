@@ -24,7 +24,7 @@ export function DashboardPage() {
           >
             下一步
           </CardTitle>
-          <DecisionList decisions={data.open_decisions.slice(0, 6)} compact />
+          <DecisionList decisions={data.open_decisions.filter((d) => d.status === "planned").slice(0, 6)} compact />
         </Card>
         <Card>
           <CardTitle>最近学习</CardTitle>
@@ -36,6 +36,7 @@ export function DashboardPage() {
                 <li key={s.id} className="flex flex-col gap-1 border-s-2 border-separator-border ps-3">
                   <span className="text-caption-1-medium text-text-tertiary">
                     {fmtTime(s.started_at)}
+                    {s.course ? ` · ${s.course}` : ""}
                     {s.planned_min ? ` · 计划 ${s.planned_min} 分钟` : ""}
                     {s.goal ? ` · ${s.goal}` : ""}
                   </span>
