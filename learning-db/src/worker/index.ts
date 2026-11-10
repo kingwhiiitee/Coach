@@ -9,7 +9,7 @@ const PROTOCOL_VERSIONS = ['2025-06-18', '2025-03-26', '2024-11-05'];
 // Sent to every MCP client on initialize; clients use it as their operating manual for the tools.
 // Keep it in sync with the tool descriptions in tools.ts and with the adaptive-learning-coach SKILL.md.
 const INSTRUCTIONS = `个人学习知识库（Evidence-Centered Design 四层：知识节点 / 学习证据 / 知识状态 / 教学决策）。
-开课先调 overview 看上次的中断点和待办决策，再用 review_candidates 或 get_node 决定本轮任务；
+开课先调 overview 看上次的中断点和待办决策，再用 review_candidates 或 get_node 决定本轮任务；start_session 返回 unfinished_sessions 时先用 end_session 补上收尾，返回考核目标提示时问学生一次考试时间和题型并用 upsert_assessment 记下（不知道也建一条，不再追问）；
 讲解新知识点前先调 prerequisite_chain 建好前置知识链（可跨课程、跨学科；link_nodes 写权重 1–3 和所需层，梳理完用 upsert_node 标 prereqs_reviewed），按 teach_order 先诊断或补缺口；
 作答后用 record_attempt 按步骤记录证据（做错只记真正出错的那一步）；
 需要时用 assess_state 写状态（必须引用证据 id），用 decide 记录下一步；结束用 end_session 写微型学习记录。

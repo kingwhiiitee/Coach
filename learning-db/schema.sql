@@ -221,29 +221,37 @@ LEFT JOIN knowledge_states s
              ORDER BY assessed_at DESC, id DESC LIMIT 1);
 
 -- 只看证据的机械判断，供 AI 写状态前参考，不直接当结论。
+-- 最近一步做错 → weak；但之后有做对的随堂检查或自己解释（补救过）→ assisted。
+-- independent 满 30 天、validated 满 60 天没有任何新证据 → recheck。
 CREATE VIEW rule_baseline AS
 WITH steps AS (
-  SELECT e.node_id, e.outcome, e.observed_at, a.hints, a.context,
+  SELECT e.id, e.node_id, e.outcome, e.observed_at, a.hints, a.context,
          ROW_NUMBER() OVER (PARTITION BY e.node_id ORDER BY e.observed_at DESC, e.id DESC) AS rn
   FROM evidence e JOIN attempts a ON a.id = e.attempt_id
   WHERE e.kind = 'step' AND e.outcome IN ('demonstrated','failed')
     AND NOT (e.outcome = 'demonstrated' AND COALESCE(e.qualifier,'') IN ('guessed','lucky_path'))
     AND NOT (e.outcome = 'failed' AND COALESCE(e.qualifier,'') = 'slip')
-)
-SELECT n.id AS node_id,
-  (SELECT MAX(observed_at) FROM evidence e WHERE e.node_id = n.id) AS last_seen,
+),
+seen AS (SELECT node_id, MAX(observed_at) AS last_seen FROM evidence GROUP BY node_id)
+SELECT n.id AS node_id, seen.last_seen,
   CASE
-    WHEN NOT EXISTS (SELECT 1 FROM evidence e WHERE e.node_id = n.id) THEN 'unknown'
+    WHEN seen.last_seen IS NULL THEN 'unknown'
     WHEN NOT EXISTS (SELECT 1 FROM steps WHERE steps.node_id = n.id) THEN 'exposed'
-    WHEN EXISTS (SELECT 1 FROM steps WHERE steps.node_id = n.id AND rn = 1 AND outcome = 'failed') THEN 'weak'
+    WHEN EXISTS (SELECT 1 FROM steps WHERE steps.node_id = n.id AND rn = 1 AND outcome = 'failed') THEN
+      CASE WHEN EXISTS (SELECT 1 FROM evidence c JOIN steps f ON f.node_id = c.node_id AND f.rn = 1
+                        WHERE c.node_id = n.id AND c.id > f.id AND c.kind IN ('prediction','self_explain')
+                          AND c.outcome = 'demonstrated' AND COALESCE(c.qualifier,'') NOT IN ('guessed','lucky_path'))
+           THEN 'assisted' ELSE 'weak' END
     WHEN (SELECT COUNT(DISTINCT date(observed_at)) FROM steps
           WHERE steps.node_id = n.id AND outcome = 'demonstrated' AND hints = 'none'
-            AND context IN ('delayed','mixed','unseen_variant')) >= 2 THEN 'validated'
+            AND context IN ('delayed','mixed','unseen_variant')) >= 2 THEN
+      CASE WHEN julianday('now') - julianday(seen.last_seen) >= 60 THEN 'recheck' ELSE 'validated' END
     WHEN EXISTS (SELECT 1 FROM steps WHERE steps.node_id = n.id AND outcome = 'demonstrated' AND hints = 'none'
-                   AND context <> 'right_after_teaching') THEN 'independent'
+                   AND context <> 'right_after_teaching') THEN
+      CASE WHEN julianday('now') - julianday(seen.last_seen) >= 30 THEN 'recheck' ELSE 'independent' END
     ELSE 'assisted'
   END AS suggested_level
-FROM nodes n;
+FROM nodes n LEFT JOIN seen ON seen.node_id = n.id;
 
 CREATE VIEW current_values AS
 SELECT v.* FROM node_values v

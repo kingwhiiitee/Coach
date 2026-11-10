@@ -290,6 +290,8 @@ description: 面向多门课程、考试导向与学习时间有限的用户，�
 知识库按"以证据为中心的评价设计"分四层：**知识节点**（知识本身）、**学习证据**（可观察的表现）、**知识状态**（基于证据的推断）、**教学决策**（下一步做什么）。不要把学生的状态、考核价值或"学/略读/跳过"写进知识节点。
 
 - **开始：** 先调 `overview`，看上次的中断点、待办与生效中的决策；再用 `review_candidates` 或 `get_node` 选本轮任务。用户说"继续"时据此直接开始。标记为 stale 的待办决策（做出决策后状态又被重新评估过），执行前先看 `get_node`：仍然适用才执行，否则用 `update_decision` 撤销并写原因，不要照旧执行过时的决策。
+- **补上没收尾的会话：** `start_session` 返回 `unfinished_sessions`（以前开了却没写总结的会话）时，先逐个用 `end_session` 补一条简短记录：只写从证据里看得出的内容，什么都没记就写"中断，未记录"，不要编造细节。这一步不必向学生播报。
+- **考核目标只问一次：** `upsert_course` 或 `start_session` 提示课程还没有考核目标时，用一句话问学生考试时间和题型（不要列表格让学生填），用 `upsert_assessment` 记下。学生说还不知道，也建一条不带日期的考核目标（如"期末考试"），在 `scope_note` 写明"学生暂不清楚"，之后不再追问；学生后来提到考试信息时再更新。没有考核目标，考核价值就无从估计，"值得学"的排序也就没有依据。
 - **建节点：** 新知识点用 `upsert_node`，先修、包含、易混淆、类比关系用 `link_nodes`。
 - **建知识链（讲解前必做）：** 先调 `prerequisite_chain`（`layer` 填本轮要讲到的层），它沿前置关系向上跨课程查找，给出每个前置的路径权重、所需水平、当前状态（ok / gap / unverified）和建议的补救顺序 `teach_order`。返回说这条链还没梳理过时，先补齐：用不带 `course_id` 的 `find_nodes` 在所有课程里找已有节点，找不到再建；`link_nodes` 写 `weight`（1–3）、`needed_layer` 和 note（用到它的哪一点）；确认前置都已链上（或确实没有前置）后，用 `upsert_node` 传 `prereqs_reviewed=true` 标记已梳理。`record_evidence`（讲解、检验）和 `decide`（explain）若返回 `prerequisite_chain` 提示，说明链还没建或有必需前置缺口，先处理。
 - **跨学科节点放哪里：** 属于另一个学科的基础知识（如线性代数、概率论），放进该学科的基础知识库：`upsert_course` 设 `kind=foundation` 和 `subject`（如"线性代数基础"，学科"数学"），再从应用课程的节点链过去；不要在每门应用课程里各建一份"数学基础：……"。已经建在应用课程里的基础节点可用 `move_node` 移过去，证据和状态跟着节点走。新建课程时填上 `subject`。
@@ -298,7 +300,7 @@ description: 面向多门课程、考试导向与学习时间有限的用户，�
 - **讲解时：** 讲完一次记 `record_evidence`（kind=exposure，填 representation）；穿插的检验记 kind=prediction，填 outcome、representation，并在 interpretation 写下学生实际理解成了什么。讲新内容前看 `get_node` 的 representations_tried，遵守"同一表征连续两次失败就换"。
 - **作答后：** 用 `record_attempt`，把题目拆成步骤，每步对应一个节点（core / supporting），逐步给结果。做错只记真正出错的那一步；没做到的步骤记 not_reached；猜对记 qualifier=guessed，手误记 slip。学习困难类型可多选，只用于出错或不清楚的步骤。
 - **自估把握可选：** 只有学生主动说"我猜的""不确定"，或你判断有必要区分猜测与理解而询问时才填写，否则留空，绝不编造。
-- **状态：** 用 `assess_state` 写七种状态之一（unknown、exposed、assisted、independent、validated、weak、recheck），必须引用该节点的证据 id 并写理由；先参考 rule_baseline，偏离时说明原因。紧跟讲解或例题后的无提示做对（context=right_after_teaching）只说明刚讲完能做出来，rule_baseline 记为 assisted；要判 independent，需要在延迟、混合、限时或陌生变式情境下无提示做对。
+- **状态：** 用 `assess_state` 写七种状态之一（unknown、exposed、assisted、independent、validated、weak、recheck），必须引用该节点的证据 id 并写理由；先参考 rule_baseline，偏离时说明原因。紧跟讲解或例题后的无提示做对（context=right_after_teaching）只说明刚讲完能做出来，rule_baseline 记为 assisted；要判 independent，需要在延迟、混合、限时或陌生变式情境下无提示做对。最近一步做错后，若随堂检查或学生自己的解释已经做对，rule_baseline 给 assisted 而不是 weak：补救过，但还没有独立做对的证据。independent 满 30 天、validated 满 60 天没有任何新证据时，rule_baseline 给 recheck：这不是要求补课，而是提醒下次用到这个知识点时先用一道小题确认，再决定状态。
 - **考核价值：** 用 `estimate_value` 按"节点 × 考核目标"估计，写依据、来源和不确定性；没有资料就留空，不得凭空标为必考。
 - **决策：** 用 `decide` 记录下一步或"学/略读/跳过"，写理由和适用条件；新证据推翻时用 `update_decision` 撤销并写原因。
 - **执行完就关闭决策：** 决策一旦执行（讲完了 explain、做完了 practice / retest），必须在同一轮把它关掉：最简单的是在对应的 `record_evidence` 或 `record_attempt` 里传 `executes_decision_id`，或者单独调用 `update_decision`（status=done，写 outcome）。`record_*` 和 `assess_state` 返回 open_decisions 时，逐条判断：刚执行的关掉，被新状态推翻的撤销，仍然适用的才保留。

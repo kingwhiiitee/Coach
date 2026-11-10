@@ -26,7 +26,7 @@
 - **跨学科**：`courses.subject` 记学科；`courses.kind = foundation` 是跨课程共享的学科基础库（如"线性代数基础"）。关系可以连接任意两门课程的节点；`analogous_to` 记不同学科间结构相同、可作类比的知识。
 - `prerequisite_chain` 沿前置关系向上（跨课程）走，给出每个前置的路径权重、所需水平、当前状态（ok / gap / unverified）和补救顺序；`nodes.prereqs_reviewed_at` 记这条链是否已梳理完。前置关系不允许成环。
 
-视图：`current_state`（每个节点的最新状态）、`rule_baseline`（只看证据的机械建议，供 AI 参考）、`current_values`、`open_decisions`。
+视图：`current_state`（每个节点的最新状态）、`rule_baseline`（只看证据的机械建议，供 AI 参考：最近一步做错是 weak，之后检查做对是 assisted；独立完成满 30 天、已验证满 60 天没有新证据是 recheck）、`current_values`、`open_decisions`。
 
 ## MCP 工具
 
@@ -34,7 +34,7 @@
 | --- | --- |
 | `overview` `find_nodes` `get_node` `prerequisite_chain` `review_candidates` | `upsert_course` `upsert_assessment` `upsert_node` `link_nodes` `move_node` `start_session` `end_session` `record_attempt` `record_evidence` `assess_state` `estimate_value` `decide` `update_decision` `delete_record` |
 
-工具层强制几条规则：状态必须引用本节点的证据；没有真实资料不能把考核价值标为 3；新的学 / 略读 / 跳过决定会自动撤销旧决定；撤销决定必须写原因；自估把握只在提供时记录。参数按各工具的 schema 校验：数字字符串会转成整数，写错的参数名会报错并列出可用的名字；一次调用要么全部写入，要么在写入前被拒绝。
+工具层强制几条规则：状态必须引用本节点的证据；没有真实资料不能把考核价值标为 3；新的学 / 略读 / 跳过决定会自动撤销旧决定；撤销决定必须写原因；自估把握只在提供时记录。`start_session` 会列出没写总结的旧会话，提醒先补上收尾；课程没有考核目标时，`upsert_course` / `start_session` 会提醒问一次考试信息。参数按各工具的 schema 校验：数字字符串会转成整数，写错的参数名会报错并列出可用的名字；一次调用要么全部写入，要么在写入前被拒绝。
 
 `delete_record` 用来删掉建错或重复的记录（课程、节点、考核目标、题目、学习会话、作答、证据、状态、决策、考核价值）。不带 `confirm` 调用只预览、不删除，列出会连带删掉的所有内容（例如删节点会带走它的关系、证据、状态、考核价值、决策，以及每一步都只考这个节点的题目）；学生同意后带 `confirm=true` 再调一次，所有删除在一个事务里完成。剩下的状态如果引用了被删的证据，会提示重新评估。改判断不靠删除：状态用新的 `assess_state` 覆盖，决策用 `update_decision` 撤销。
 

@@ -9,7 +9,7 @@
       "name": "adaptive-learning-coach",
       "source": "./plugins/adaptive-learning-coach",
       "description": "Adaptive study coach for time-limited, exam-oriented learners: picks diagnose / explain / practice / review by expected learning gain",
-      "version": "0.2.5",
+      "version": "0.2.6",
       "keywords": ["learning", "tutor", "study", "exam"]
     }
   ]

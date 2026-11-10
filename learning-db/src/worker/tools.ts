@@ -588,6 +588,18 @@ async function chainNotice(env: Env, nodeId: number) {
   };
 }
 
+// Without an assessment every exam value stays empty and "worth it" ranking has nothing to go on.
+// An assessment row with no date is how "asked, student does not know yet" is remembered, so the hint stops.
+async function assessmentHint(env: Env, courseId: number): Promise<string | null> {
+  const c = await first<{ kind: string; n: number }>(
+    env,
+    'SELECT c.kind, (SELECT COUNT(*) FROM assessments a WHERE a.course_id = c.id) AS n FROM courses c WHERE c.id = ?',
+    courseId,
+  );
+  if (!c || c.kind !== 'course' || c.n > 0) return null;
+  return 'This course has no assessment on record, so exam value cannot be estimated. Ask the student once (one short question, not a form) when the exam is and what it looks like, then call upsert_assessment. If they do not know yet, still create it (e.g. 期末考试) without a date and say so in scope_note; do not ask again.';
+}
+
 const nodeId = int('Knowledge node id (look it up with find_nodes)');
 
 export const TOOLS: Tool[] = [
@@ -715,7 +727,7 @@ export const TOOLS: Tool[] = [
   {
     name: 'upsert_course',
     description:
-      'Create a course, or update it if a course with this name exists. Returns its id. kind=foundation makes a shared knowledge base for one subject (e.g. 线性代数基础, 概率论基础) that other courses link into, instead of copying basics into every course.',
+      'Create a course, or update it if a course with this name exists. Returns its id, plus a hint to ask about the exam when a new course has no assessment. kind=foundation makes a shared knowledge base for one subject (e.g. 线性代数基础, 概率论基础) that other courses link into, instead of copying basics into every course.',
     inputSchema: obj(
       {
         name: str('Course name'),
@@ -729,6 +741,7 @@ export const TOOLS: Tool[] = [
       const status = opt<string>(a, 'status');
       inEnum(status, ['active', 'paused', 'done'], 'status');
       inEnum(opt(a, 'kind'), COURSE_KINDS, 'kind');
+      const existed = await first(env, 'SELECT id FROM courses WHERE name = ?', need<string>(a, 'name'));
       const row = await first<{ id: number }>(
         env,
         `INSERT INTO courses (name, status, subject, kind) VALUES (?, COALESCE(?, 'active'), ?, COALESCE(?, 'course'))
@@ -742,7 +755,8 @@ export const TOOLS: Tool[] = [
         status,
         opt(a, 'kind'),
       );
-      return { course_id: row?.id };
+      const hint = !existed && row ? await assessmentHint(env, row.id) : null;
+      return { course_id: row?.id, ...(hint ? { hint } : {}) };
     },
   },
   {
@@ -957,7 +971,8 @@ export const TOOLS: Tool[] = [
   },
   {
     name: 'start_session',
-    description: 'Open a study session. Returns session_id to attach evidence to.',
+    description:
+      'Open a study session. Returns session_id to attach evidence to. If it returns unfinished_sessions (earlier sessions that never got a summary), close each with end_session first, writing what is actually known from its evidence; do not invent details. If it returns an assessment hint, the course has no exam on record: ask the student once.',
     inputSchema: obj({
       course_id: int('Course id'),
       planned_min: int('Minutes the student has'),
@@ -966,14 +981,30 @@ export const TOOLS: Tool[] = [
     run: async (env, a) => {
       const course = opt<number>(a, 'course_id');
       if (course) await mustExist(env, 'courses', course, 'course');
+      const unfinished = await all(
+        env,
+        `SELECT s.id, s.course_id, c.name AS course, s.started_at, s.goal,
+                (SELECT COUNT(*) FROM evidence e WHERE e.session_id = s.id) AS evidence_count
+         FROM sessions s LEFT JOIN courses c ON c.id = s.course_id
+         WHERE s.summary IS NULL ORDER BY s.started_at DESC, s.id DESC LIMIT 5`,
+      );
+      const sessionId = await insertId(
+        env,
+        'INSERT INTO sessions (course_id, planned_min, goal) VALUES (?, ?, ?)',
+        course,
+        opt(a, 'planned_min'),
+        opt(a, 'goal'),
+      );
+      const hints = [
+        unfinished.length
+          ? 'unfinished_sessions were never closed. Before going on, call end_session for each with a short summary of what its evidence shows (find_nodes / get_node), or "中断，未记录" if nothing was recorded.'
+          : null,
+        course ? await assessmentHint(env, course) : null,
+      ].filter(Boolean);
       return {
-        session_id: await insertId(
-          env,
-          'INSERT INTO sessions (course_id, planned_min, goal) VALUES (?, ?, ?)',
-          course,
-          opt(a, 'planned_min'),
-          opt(a, 'goal'),
-        ),
+        session_id: sessionId,
+        ...(unfinished.length ? { unfinished_sessions: unfinished } : {}),
+        ...(hints.length ? { hint: hints.join(' ') } : {}),
       };
     },
   },
@@ -1227,7 +1258,7 @@ export const TOOLS: Tool[] = [
   {
     name: 'assess_state',
     description:
-      'Write a new knowledge-state judgement for a node (appended; history is kept). level: unknown, exposed, assisted, independent, validated, weak, recheck. basis must list the evidence ids it rests on (from this node), except for unknown. Check get_node\'s rule_baseline first and explain in rationale when you deviate from it. Returns the node\'s still-planned decisions: review each against the new state and close, revoke or keep it.',
+      'Write a new knowledge-state judgement for a node (appended; history is kept). level: unknown, exposed, assisted, independent, validated, weak, recheck. basis must list the evidence ids it rests on (from this node), except for unknown. Check get_node\'s rule_baseline first and explain in rationale when you deviate from it (it suggests assisted, not weak, once a failed step was followed by a passed check, and recheck when an independent/validated node has had no evidence for 30/60 days). Returns the node\'s still-planned decisions: review each against the new state and close, revoke or keep it.',
     inputSchema: obj(
       {
         node_id: nodeId,

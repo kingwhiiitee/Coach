@@ -1,6 +1,6 @@
 {
   "name": "adaptive-learning-coach",
-  "version": "0.2.5",
+  "version": "0.2.6",
   "description": "自适应 AI 学习教练：在时间有限、多门课程、考试导向的情况下，按学习收益动态选择诊断、讲解、练习或复习。",
   "author": {
     "name": "WH1T3K1NG"

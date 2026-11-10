@@ -128,6 +128,7 @@ const pe = await call('record_evidence', { node_id: ids['链式法则'], kind: '
 check(pe.open_decisions?.some((d) => d.id === d4.decision_id), 'recording evidence lists open decisions on the node');
 const st2 = await call('assess_state', { node_id: ids['链式法则'], level: 'assisted', rationale: '图示后能判断', basis: [pe.evidence_id] });
 check(st2.open_decisions?.length === 1 && st2.hint, 'assess_state lists planned decisions to review');
+check((await call('get_node', { node_id: ids['链式法则'] })).rule_baseline.suggested_level === 'assisted', 'rule baseline: failed step followed by a passed check → assisted');
 const ov2 = await call('overview', {});
 check(ov2.open_decisions.find((d) => d.id === d4.decision_id)?.stale === 1, 'overview flags the decision as stale after a newer state');
 const es = await call('end_session', { session_id, summary: '第二段' });
@@ -218,3 +219,15 @@ check(pc.will_delete.courses === 1 && pc.will_delete.nodes === 1 && pc.will_dele
 check((await call('delete_record', { target: 'course', id: tmp, confirm: true })).deleted, 'course deleted with everything in it');
 check(!(await call('overview', {})).courses.some((c) => c.id === tmp), 'course gone from overview');
 void soloTask;
+
+const nc = await call('upsert_course', { name: '新课程', subject: '测试' });
+check(nc.hint?.includes('upsert_assessment'), 'new course without an assessment gets an ask-once hint');
+check(!(await call('upsert_course', { name: '新课程' })).hint && !(await call('upsert_course', { name: '新基础', kind: 'foundation' })).hint, 'no hint on update or for foundation courses');
+const s1 = await call('start_session', { course_id: nc.course_id });
+check(s1.hint?.includes('upsert_assessment'), 'start_session repeats the hint while the course has no assessment');
+await call('upsert_assessment', { course_id: nc.course_id, name: '期末考试', scope_note: '学生暂不清楚' });
+const s2 = await call('start_session', { course_id: nc.course_id });
+check(s2.unfinished_sessions?.some((s) => s.id === s1.session_id) && !s2.hint.includes('upsert_assessment'), 'start_session lists sessions that never got a summary');
+await call('end_session', { session_id: s1.session_id, summary: '中断，未记录' });
+await call('end_session', { session_id: s2.session_id, summary: 'x' });
+check(!(await call('start_session', {})).unfinished_sessions, 'nothing listed once they are closed');
